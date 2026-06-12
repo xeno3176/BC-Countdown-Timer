@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Countdown Manager</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+const AppStorage = {
+  async get(k) { const v = localStorage.getItem(k); return v == null ? null : { key: k, value: v }; },
+  async set(k, v) { localStorage.setItem(k, v); return { key: k, value: v }; },
+};
+
+/* ---------------- helpers ---------------- */
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+const TIMEZONES = [
+  { v: "+10:00", label: "Sydney / Melbourne — standard time (UTC+10)" },
+  { v: "+11:00", label: "Sydney / Melbourne — daylight saving (UTC+11)" },
+  { v: "+00:00", label: "UTC" },
+  { v: "-04:00", label: "US Eastern — daylight saving (UTC−4)" },
+  { v: "-05:00", label: "US Eastern — standard (UTC−5)" },
+  { v: "-07:00", label: "US Pacific — daylight saving (UTC−7)" },
+  { v: "-08:00", label: "US Pacific — standard (UTC−8)" },
+  { v: "+01:00", label: "Central Europe — standard (UTC+1)" },
+  { v: "+02:00", label: "Central Europe — daylight saving (UTC+2)" },
+  { v: "+08:00", label: "Singapore / Perth (UTC+8)" },
+];
+
+const FONTS = [
+  { label: "Arial / Helvetica", v: "Arial,Helvetica,sans-serif" },
+  { label: "Helvetica Neue", v: "'Helvetica Neue',Helvetica,Arial,sans-serif" },
+  { label: "Lato (loaded from Google Fonts)", v: "'Lato',Arial,sans-serif", gf: "Lato" },
+  { label: "Segoe UI (modern sans)", v: "'Segoe UI',system-ui,-apple-system,sans-serif" },
+  { label: "Verdana", v: "Verdana,Geneva,sans-serif" },
+  { label: "Trebuchet MS", v: "'Trebuchet MS',Helvetica,sans-serif" },
+  { label: "Tahoma", v: "Tahoma,Verdana,sans-serif" },
+  { label: "Georgia (serif)", v: "Georgia,'Times New Roman',serif" },
+  { label: "Impact (heavy display)", v: "Impact,'Arial Black',sans-serif" },
+  { label: "Courier (monospace)", v: "'Courier New',Consolas,monospace" },
+  { label: "Custom font name…", v: "custom" },
+];
+
+const epoch = (dt, tz) => (dt ? Date.parse(dt + ":00" + (tz || "+10:00")) : 0);
+const toLocalStr = (ms, tz) => {
+  const m = /([+-])(\d{2}):(\d{2})/.exec(tz || "+10:00");
+  const off = (m ? (m[1] === "-" ? -1 : 1) * (+m[2] * 60 + +m[3]) : 600) * 60000;
+  return new Date(ms + off).toISOString().slice(0, 16);
+};
+const fmtNice = (dt) => {
+  if (!dt) return "—";
+  const d = new Date(dt + ":00");
+  return d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+};
+const escAttr = (s) => (s || "").replace(/"/g, "&quot;");
+const expandHex = (v) => (/^#[0-9a-fA-F]{3}$/.test(v) ? "#" + v[1] + v[1] + v[2] + v[2] + v[3] + v[3] : v);
+const hexRgba = (h, a) => {
+  const x = expandHex(h || "#000000").slice(1);
+  const n = parseInt(x, 16) || 0;
+  return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + a + ")";
+};
+
+/* ---------------- timer model ---------------- */
+const defaultStyle = () => ({
+  bg: "#16243A", fg: "#FFFFFF",
+  digitBg: "#0C1828", digitFg: "#FFFFFF",
+  btnBg: "#F5A524", btnFg: "#16243A",
+  radius: 12, size: "regular", labels: true,
+  font: "Arial,Helvetica,sans-serif", customFont: "", customGoogle: false, digitFont: "mono",
+  maxWidth: "", padV: 16, padH: 20, minHeight: "", align: "center",
+  fxShadow: false, fxBorder: false, fxBorderColor: "#FFFFFF", fxPulse: false,
+  fxGradient: false, fxGradient2: "#0C1828", fxGlow: false, fxColons: false,
+});
+
+const newPhase = (s, startAt = "") => ({
+  id: uid(), startAt,
+  message: "", ctaText: "", ctaUrl: "",
+  overrideColors: false,
+  bg: s.bg, fg: s.fg, db: s.digitBg, df: s.digitFg, bb: s.btnBg, bf: s.btnFg,
+});
+
+const blankTimer = (tz = "+10:00") => {
+  const s = defaultStyle();
+  const end = Date.now() + 14 * 864e5;
+  return {
+    id: uid(), name: "New timer", tz,
+    endAt: toLocalStr(end, tz), showAt: "", hideAt: "",
+    endMode: "hide", endMsg: "Offer ended",
+    endBg: s.bg, endFg: s.fg, endBtnText: "", endBtnUrl: "", endBtnBg: s.btnBg, endBtnFg: s.btnFg,
+    phases: [{ ...newPhase(s), message: "Limited time offer" }],
+    style: s,
+  };
+};
+
+const seedTimer = () => {
+  const tz = "+10:00";
+  const t = blankTimer(tz);
+  const s = t.style;
+  const url = "https://hatchembroidery.com/digitizer-mega-pack";
+  t.name = "Example: Hatch sale";
+  t.endAt = "2026-06-15T17:00";
+  t.showAt = "2026-06-11T00:00";
+  t.hideAt = "2026-06-16T11:59";
+  t.endMode = "message";
+  t.endMsg = "Offer ended";
+  t.endBg = "#3D4856";
+  t.endFg = "#FFFFFF";
+  t.phases = [
+    { ...newPhase(s), message: "Save US$300 today!", ctaText: "Shop now", ctaUrl: url },
+    { ...newPhase(s, "2026-06-13T17:00"), message: "Final few days to <b>SAVE US$300!</b>", ctaText: "Shop now", ctaUrl: url, overrideColors: true, bg: "#C2410C", fg: "#FFFFFF", db: "#7C2D12", df: "#FFFFFF", bb: "#FFD166", bf: "#7C2D12" },
+    { ...newPhase(s, "2026-06-14T17:00"), message: "FINAL DAY TO <b>SAVE US$300!</b>", ctaText: "Shop now", ctaUrl: url, overrideColors: true, bg: "#B91C1C", fg: "#FFFFFF", db: "#7F1010", df: "#FFD166", bb: "#FFD166", bf: "#7F1010" },
+  ];
+  return t;
+};
+
+const migrate = (t) => {
+  const old = t.style || {};
+  const s = { ...defaultStyle(), ...old };
+  if (old.padding != null && old.padV == null) {
+    s.padV = +old.padding || 16;
+    s.padH = (+old.padding || 16) + 4;
+  }
+  const phases = (t.phases || []).map((p) => ({
+    id: p.id || uid(), startAt: p.startAt || "",
+    message: p.message || "", ctaText: p.ctaText || "", ctaUrl: p.ctaUrl || "",
+    overrideColors: !!p.overrideColors,
+    bg: p.bg || s.bg, fg: p.fg || s.fg,
+    db: p.db || s.digitBg, df: p.df || s.digitFg,
+    bb: p.bb || p.ac || s.btnBg, bf: p.bf || s.btnFg,
+  }));
+  return {
+    id: t.id || uid(), name: t.name || "Timer", tz: t.tz || "+10:00",
+    endAt: t.endAt || "", showAt: t.showAt || "", hideAt: t.hideAt || "",
+    endMode: t.endMode || "hide", endMsg: t.endMsg || "",
+    endBg: t.endBg || s.bg, endFg: t.endFg || s.fg,
+    endBtnText: t.endBtnText || "", endBtnUrl: t.endBtnUrl || "",
+    endBtnBg: t.endBtnBg || s.btnBg, endBtnFg: t.endBtnFg || s.btnFg,
+    phases: phases.length ? phases : [newPhase(s)],
+    style: s,
+  };
+};
+
+/* ---------------- config + render ---------------- */
+const resolveFont = (s) => (s.font === "custom" ? "'" + (s.customFont || "Arial").replace(/['"]/g, "") + "',Arial,sans-serif" : s.font);
+const googleFontName = (s) => {
+  const f = FONTS.find((x) => x.v === s.font);
+  if (f && f.gf) return f.gf;
+  if (s.font === "custom" && s.customGoogle && s.customFont) return s.customFont.trim();
+  return "";
+};
+
+const buildCfg = (t) => {
+  const tz = t.tz || "+10:00";
+  const ph = t.phases
+    .map((p, i) => ({
+      at: i === 0 ? 0 : epoch(p.startAt, tz) || 0,
+      msg: p.message || "", cta: p.ctaText || "", url: escAttr(p.ctaUrl || "#"),
+      bg: p.overrideColors ? p.bg : "", fg: p.overrideColors ? p.fg : "",
+      db: p.overrideColors ? p.db : "", df: p.overrideColors ? p.df : "",
+      bb: p.overrideColors ? p.bb : "", bf: p.overrideColors ? p.bf : "",
+    }))
+    .sort((a, b) => a.at - b.at);
+  const s = t.style;
+  return {
+    show: epoch(t.showAt, tz) || 0, hide: epoch(t.hideAt, tz) || 0, end: epoch(t.endAt, tz) || 0,
+    em: t.endMode || "hide",
+    es: { msg: t.endMsg || "", bg: t.endBg, fg: t.endFg, bt: t.endBtnText || "", bu: escAttr(t.endBtnUrl || "#"), bb: t.endBtnBg, bf: t.endBtnFg },
+    st: {
+      bg: s.bg, fg: s.fg, db: s.digitBg, df: s.digitFg, bb: s.btnBg, bf: s.btnFg,
+      r: +s.radius || 0, sz: s.size, lb: s.labels ? 1 : 0,
+      f: resolveFont(s), gf: googleFontName(s), dm: s.digitFont === "match" ? 1 : 0,
+      mw: +s.maxWidth || 0, pv: +s.padV || 16, px: +s.padH || 20, mh: +s.minHeight || 0, al: s.align || "center",
+      xs: s.fxShadow ? 1 : 0, xb: s.fxBorder ? 1 : 0, xc: s.fxBorderColor || "#FFFFFF", xp: s.fxPulse ? 1 : 0,
+      gr: s.fxGradient ? 1 : 0, g2: s.fxGradient2 || "#0C1828", gl: s.fxGlow ? 1 : 0, cl: s.fxColons ? 1 : 0,
+    },
+    ph,
+  };
+};
+
+const SZ = { small: [13, 20, 8], regular: [15, 26, 10], large: [18, 34, 12] };
+const p2 = (n) => (n < 10 ? "0" : "") + n;
+const pickPhase = (C, n) => {
+  let a = C.ph[0];
+  for (let i = 0; i < C.ph.length; i++) if (C.ph[i].at <= n) a = C.ph[i];
+  return a;
+};
+
+const wrapStyle = (C, bg, fg, grad) => {
+  const st = C.st;
+  const bgCss = grad ? "linear-gradient(135deg," + bg + "," + st.g2 + ")" : bg;
+  let w = "background:" + bgCss + ";color:" + fg + ";border-radius:" + st.r + "px;padding:" + st.pv + "px " + st.px + "px;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:14px 24px;font-family:" + st.f + ";text-align:center;box-sizing:border-box";
+  if (st.mw) { w += ";max-width:" + st.mw + "px"; if (st.al === "center") w += ";margin-left:auto;margin-right:auto"; else if (st.al === "right") w += ";margin-left:auto"; }
+  if (st.mh) w += ";min-height:" + st.mh + "px";
+  const sh = [];
+  if (st.xs) sh.push("0 12px 28px rgba(0,0,0,.25)");
+  if (st.gl) sh.push("0 0 30px " + hexRgba(st.bb, 0.5));
+  if (sh.length) w += ";box-shadow:" + sh.join(",");
+  if (st.xb) w += ";border:2px solid " + st.xc;
+  return w;
+};
+
+const PULSE = "<style>@keyframes wcdtP{0%{transform:scale(1.16)}100%{transform:scale(1)}}</style>";
+
+const renderHTML = (C, n) => {
+  if (!C.end) return { hidden: true, html: "" };
+  if ((C.show && n < C.show) || (C.hide && n > C.hide)) return { hidden: true, html: "" };
+  const st = C.st;
+  const s = SZ[st.sz] || SZ.regular;
+  if (n >= C.end) {
+    if (C.em === "hide" || !C.es.msg) return { hidden: true, html: "" };
+    let h = '<div style="' + wrapStyle(C, C.es.bg, C.es.fg, 0) + '">';
+    h += '<div style="font-size:' + (s[0] + 3) + 'px;font-weight:700;line-height:1.35">' + C.es.msg + "</div>";
+    if (C.es.bt) h += '<a href="' + C.es.bu + '" style="background:' + C.es.bb + ";color:" + C.es.bf + ";text-decoration:none;font-weight:700;font-size:" + s[0] + "px;padding:11px 20px;border-radius:" + Math.min(st.r, 999) + 'px;display:inline-block">' + C.es.bt + "</a>";
+    return { hidden: false, html: h + "</div>" };
+  }
+  const p = pickPhase(C, n);
+  const bg = p.bg || st.bg, fg = p.fg || st.fg, db = p.db || st.db, df = p.df || st.df, bb = p.bb || st.bb, bf = p.bf || st.bf;
+  const grad = st.gr && !p.bg ? 1 : 0;
+  const dfnt = st.dm ? st.f : "Consolas,Menlo,monospace";
+  const box = (v, l, sec) => {
+    let h = '<div style="text-align:center"><div style="background:' + db + ";color:" + df + ";border-radius:" + Math.min(st.r, 12) + "px;padding:" + s[2] + "px " + (s[2] + 3) + "px;font-family:" + dfnt + ";font-size:" + s[1] + "px;font-weight:700;line-height:1;min-width:" + Math.round(s[1] * 1.7) + "px" + (sec && st.xp ? ";animation:wcdtP .45s ease-out" : "") + '">' + v + "</div>";
+    if (st.lb) h += '<div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;opacity:.7;margin-top:5px;color:' + fg + '">' + l + "</div>";
+    return h + "</div>";
+  };
+  const colon = st.cl ? '<div style="font-size:' + (s[1] - 4) + "px;font-weight:700;line-height:" + (s[1] + s[2] * 2) + "px;color:" + fg + ';opacity:.55">:</div>' : "";
+  const d = C.end - n;
+  const dd = Math.floor(d / 864e5), hh = Math.floor(d / 36e5) % 24, mm = Math.floor(d / 6e4) % 60, ss = Math.floor(d / 1e3) % 60;
+  let h = (st.xp ? PULSE : "") + '<div style="' + wrapStyle(C, bg, fg, grad) + '">';
+  if (p.msg) h += '<div style="font-size:' + (s[0] + 3) + 'px;font-weight:700;line-height:1.35;max-width:360px">' + p.msg + "</div>";
+  h += '<div style="display:flex;gap:' + (st.cl ? 5 : 8) + 'px;align-items:flex-start">' + box(dd, "days", 0) + colon + box(p2(hh), "hrs", 0) + colon + box(p2(mm), "min", 0) + colon + box(p2(ss), "sec", 1) + "</div>";
+  if (p.cta) h += '<a href="' + p.url + '" style="background:' + bb + ";color:" + bf + ";text-decoration:none;font-weight:700;font-size:" + s[0] + "px;padding:11px 20px;border-radius:" + Math.min(st.r, 999) + 'px;display:inline-block">' + p.cta + "</a>";
+  return { hidden: false, html: h + "</div>" };
+};
+
+/* ---------------- code generators ---------------- */
+
+// Slug: timer name → safe ID for use in data-wcdt-id
+const toSlug = (name) => (name || "timer").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "timer";
+
+// Build timers.json — pure JSON, fetched by the engine
+const buildTimersJson = (timers) => {
+  const obj = {};
+  timers.forEach((t) => { obj[toSlug(t.name)] = buildCfg(t); });
+  return JSON.stringify(obj, null, 2);
+};
+
+// Engine script — fetches timers.json via fetch() to avoid content-type issues
+const buildEngineScript = (cfgUrl) => {
+  const url = cfgUrl || "https://raw.githubusercontent.com/YOUR-USER/YOUR-REPO/main/timers.json";
+  return `<script>
+/* WCDT Engine v12 — paste once into BigCommerce Script Manager */
+(function(){
+if(window.__wcdtEngine)return;
+window.__wcdtEngine=true;
+var CFG_URL='${url}';
+var SZ={small:[13,20,8],regular:[15,26,10],large:[18,34,12]};
+var PULSE='<st'+'yle>@keyframes wcdtP{0%{transform:scale(1.16)}100%{transform:scale(1)}}</st'+'yle>';
+function p2(n){return(n<10?"0":"")+n}
+function pick(C,n){var a=C.ph[0];for(var i=0;i<C.ph.length;i++){if(C.ph[i].at<=n)a=C.ph[i]}return a}
+function rgba(h,a){h=h.replace('#','');if(h.length===3)h=h[0]+h[0]+h[1]+h[1]+h[2]+h[2];var n=parseInt(h,16)||0;return'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'}
+function wrap(C,bg,fg,grad){
+ var st=C.st,bgCss=grad?'linear-gradient(135deg,'+bg+','+st.g2+')':bg;
+ var w='background:'+bgCss+';color:'+fg+';border-radius:'+st.r+'px;padding:'+st.pv+'px '+st.px+'px;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:14px 24px;font-family:'+st.f+';text-align:center;box-sizing:border-box';
+ if(st.mw){w+=';max-width:'+st.mw+'px';if(st.al==='center')w+=';margin-left:auto;margin-right:auto';else if(st.al==='right')w+=';margin-left:auto'}
+ if(st.mh)w+=';min-height:'+st.mh+'px';
+ var sh=[];if(st.xs)sh.push('0 12px 28px rgba(0,0,0,.25)');if(st.gl)sh.push('0 0 30px '+rgba(st.bb,.5));
+ if(sh.length)w+=';box-shadow:'+sh.join(',');if(st.xb)w+=';border:2px solid '+st.xc;
+ return w;
+}
+function renderEl(el,C){
+ var iv=el.__wcdtIv||null;
+ function render(){
+  var n=Date.now();
+  if((C.show&&n<C.show)||(C.hide&&n>C.hide)){el.style.display='none';el.innerHTML='';return}
+  var st=C.st,s=SZ[st.sz]||SZ.regular;
+  if(n>=C.end){
+   if(iv){clearInterval(iv);iv=null;el.__wcdtIv=null}
+   if(C.em==='hide'||!C.es.msg){el.style.display='none';el.innerHTML='';return}
+   var e='<div style="'+wrap(C,C.es.bg,C.es.fg,0)+'"><div style="font-size:'+(s[0]+3)+'px;font-weight:700;line-height:1.35">'+C.es.msg+'</div>';
+   if(C.es.bt)e+='<a href="'+C.es.bu+'" style="background:'+C.es.bb+';color:'+C.es.bf+';text-decoration:none;font-weight:700;font-size:'+s[0]+'px;padding:11px 20px;border-radius:'+Math.min(st.r,999)+'px;display:inline-block">'+C.es.bt+'</a>';
+   el.style.display='block';el.innerHTML=e+'</div>';return;
+  }
+  el.style.display='block';
+  var p=pick(C,n);
+  var bg=p.bg||st.bg,fg=p.fg||st.fg,db=p.db||st.db,df=p.df||st.df,bb=p.bb||st.bb,bf=p.bf||st.bf;
+  var grad=(st.gr&&!p.bg)?1:0,dfnt=st.dm?st.f:'Consolas,Menlo,monospace';
+  function box(v,l,sec){
+   var h='<div style="text-align:center"><div style="background:'+db+';color:'+df+';border-radius:'+Math.min(st.r,12)+'px;padding:'+s[2]+'px '+(s[2]+3)+'px;font-family:'+dfnt+';font-size:'+s[1]+'px;font-weight:700;line-height:1;min-width:'+Math.round(s[1]*1.7)+'px'+(sec&&st.xp?';animation:wcdtP .45s ease-out':'')+'">'+v+'</div>';
+   if(st.lb)h+='<div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;opacity:.7;margin-top:5px;color:'+fg+'">'+l+'</div>';
+   return h+'</div>';
+  }
+  var colon=st.cl?'<div style="font-size:'+(s[1]-4)+'px;font-weight:700;line-height:'+(s[1]+s[2]*2)+'px;color:'+fg+';opacity:.55">:</div>':'';
+  var d=C.end-n,dd=Math.floor(d/86400000),hh=Math.floor(d/3600000)%24,mm=Math.floor(d/60000)%60,ss=Math.floor(d/1000)%60;
+  var h=(st.xp?PULSE:'')+'<div style="'+wrap(C,bg,fg,grad)+'">';
+  if(p.msg)h+='<div style="font-size:'+(s[0]+3)+'px;font-weight:700;line-height:1.35;max-width:360px">'+p.msg+'</div>';
+  h+='<div style="display:flex;gap:'+(st.cl?5:8)+'px;align-items:flex-start">'+box(dd,'days',0)+colon+box(p2(hh),'hrs',0)+colon+box(p2(mm),'min',0)+colon+box(p2(ss),'sec',1)+'</div>';
+  if(p.cta)h+='<a href="'+p.url+'" style="background:'+bb+';color:'+bf+';text-decoration:none;font-weight:700;font-size:'+s[0]+'px;padding:11px 20px;border-radius:'+Math.min(st.r,999)+'px;display:inline-block">'+p.cta+'</a>';
+  el.innerHTML=h+'</div>';
+ }
+ if(C.st.gf){
+  var gid='wcdt-gf-'+C.st.gf.replace(/\\s+/g,'-');
+  if(!document.getElementById(gid)){var L=document.createElement('link');L.id=gid;L.rel='stylesheet';L.href='https://fonts.googleapis.com/css2?family='+encodeURIComponent(C.st.gf).replace(/%20/g,'+')+':wght@400;700;900&display=swap';document.head.appendChild(L);}
+ }
+ render();iv=setInterval(render,1000);el.__wcdtIv=iv;
+}
+function initAll(){
+ if(!window.__wcdtConfig)return;
+ var cfg=window.__wcdtConfig;
+ var els=document.querySelectorAll('[data-wcdt-id]:not([data-wcdt-init])');
+ for(var i=0;i<els.length;i++){
+  var el=els[i],id=el.getAttribute('data-wcdt-id');
+  var C=cfg[id];
+  if(C&&C.end){
+   el.setAttribute('data-wcdt-init','1');
+   renderEl(el,C);
+  }
+  // If config not found yet, leave without data-wcdt-init so it retries
+ }
+}
+function loadCfg(){
+ if(window.__wcdtConfig){initAll();return;}
+ fetch(CFG_URL+'?v='+Date.now())
+  .then(function(r){if(!r.ok)throw new Error(r.status);return r.json();})
+  .then(function(cfg){window.__wcdtConfig=cfg;initAll();})
+  .catch(function(e){console.warn('WCDT: could not load config',e);});
+}
+function start(){
+ if(document.body){
+  var mo=new MutationObserver(function(){initAll();});
+  mo.observe(document.body,{childList:true,subtree:true});
+ }
+ loadCfg();
+}
+if(document.readyState==='loading'){
+ document.addEventListener('DOMContentLoaded',start);
+} else {
+ start();
+}
+})();
+<\/script>`;
+};
+
+// Per-page snippet — just the tiny div
+const buildSnippet = (t) => {
+  const slug = toSlug(t.name);
+  const name = (t.name || "untitled").replace(/-->/g, "");
+  return `<!-- Countdown: ${name} -->\n<div data-wcdt-id="${slug}"></div>`;
+};
+
+/* ---------------- GitHub publish ---------------- */
+const WORKER_CODE = `export default {
+  async fetch(request) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Allow-Methods": "*"
+      }});
+    }
+    const url = new URL(request.url);
+    const target = url.searchParams.get("url");
+    if (!target) return new Response("missing ?url=", { status: 400 });
+    const res = await fetch(target, {
+      method: request.method,
+      headers: request.headers,
+      body: ["GET","HEAD"].includes(request.method) ? undefined : request.body,
+    });
+    const r = new Response(res.body, res);
+    r.headers.set("Access-Control-Allow-Origin", "*");
+    r.headers.set("Access-Control-Allow-Headers", "*");
+    return r;
+  }
+}`;
+
+const githubFetch = (proxyUrl, url, opts) => {
+  if (proxyUrl) return fetch(proxyUrl + "?url=" + encodeURIComponent(url), opts);
+  return fetch(url, opts);
+};
+
+// Write any file to GitHub with auto SHA fetch + retry on mismatch
+const githubWriteFile = async (gh, path, textContent, commitMsg) => {
+  const { repo, branch, token, proxyUrl } = gh;
+  const apiBase = "https://api.github.com/repos/" + repo + "/contents/" + path;
+  const headers = { "Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/vnd.github+json" };
+  const encoded = btoa(unescape(encodeURIComponent(textContent)));
+
+  const getSha = async () => {
+    try {
+      const r = await githubFetch(proxyUrl, apiBase + "?ref=" + branch, { headers });
+      if (r.ok) { const d = await r.json(); return d.sha; }
+    } catch (e) {}
+    return null;
+  };
+
+  const doWrite = async (sha) => {
+    const body = { message: commitMsg, content: encoded, branch };
+    if (sha) body.sha = sha;
+    return await githubFetch(proxyUrl, apiBase, { method: "PUT", headers, body: JSON.stringify(body) });
+  };
+
+  let sha = await getSha();
+  let res = await doWrite(sha);
+
+  // Retry once with fresh SHA on conflict (409/422)
+  // Wait 500ms first to let GitHub propagate the new SHA before retrying
+  if (!res.ok && (res.status === 409 || res.status === 422)) {
+    await new Promise(r => setTimeout(r, 500));
+    sha = await getSha();
+    res = await doWrite(sha);
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || "HTTP " + res.status);
+  }
+  return await res.json();
+};
+
+// Load timers-lib.json from GitHub (raw, no auth needed if repo is public)
+const githubLoadLib = async (gh) => {
+  const { repo, branch, token, proxyUrl } = gh;
+  const apiBase = "https://api.github.com/repos/" + repo + "/contents/timers-lib.json?ref=" + branch;
+  const headers = { "Authorization": "Bearer " + token, "Accept": "application/vnd.github+json" };
+  const r = await githubFetch(proxyUrl, apiBase, { headers, cache: 'no-store' });
+  if (!r.ok) return null;
+  const d = await r.json();
+  // GitHub API returns content as base64
+  const decoded = decodeURIComponent(escape(atob(d.content.replace(/\n/g, ''))));
+  return JSON.parse(decoded);
+};
+
+// Save timers-lib.json to GitHub
+const githubSaveLib = async (gh, timers) => {
+  const content = JSON.stringify(timers, null, 2);
+  return await githubWriteFile(gh, "timers-lib.json", content, "Update timers-lib.json — " + new Date().toLocaleString());
+};
+
+// Publish timers.json — pure JSON fetched by the engine via fetch()
+const githubPublish = async (gh, timers) => {
+  const content = buildTimersJson(timers);
+  await githubWriteFile(gh, "timers.json", content, "Update timers.json — " + new Date().toLocaleString());
+};
+
+/* ---------------- status + validation ---------------- */
+const getStatus = (t, now) => {
+  const C = buildCfg(t);
+  if (!C.end) return { label: "No end date", tone: "grey" };
+  if (C.show && now < C.show) return { label: "Scheduled", tone: "blue" };
+  if (C.hide && now > C.hide) return { label: "Hidden (auto)", tone: "grey" };
+  if (now >= C.end) return { label: C.em === "message" && C.es.msg ? "Ended (message showing)" : "Ended (hidden)", tone: "grey" };
+  const idx = C.ph.indexOf(pickPhase(C, now));
+  return { label: C.ph.length > 1 ? "Live · phase " + (idx + 1) : "Live", tone: "green" };
+};
+
+const phaseOutOfRange = (t, p, i) => {
+  if (i === 0) return false;
+  const at = epoch(p.startAt, t.tz);
+  if (!at) return false;
+  const lo = epoch(t.showAt, t.tz) || 0;
+  const hi = epoch(t.hideAt, t.tz) || epoch(t.endAt, t.tz) || Infinity;
+  return at < lo || at > hi;
+};
+
+const toneCls = { green: "bg-emerald-100 text-emerald-800", blue: "bg-sky-100 text-sky-800", grey: "bg-slate-200 text-slate-600" };
+
+/* ---------------- UI components ---------------- */
+const Field = ({ label, hint, children }) => (
+  <label className="block">
+    <span className="block text-[13px] font-semibold text-slate-700 mb-1">{label}</span>
+    {children}
+    {hint && <span className="block text-[12px] text-slate-500 mt-1 leading-snug">{hint}</span>}
+  </label>
+);
+const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-[14px] text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-600/40 focus:border-teal-600";
+
+const ColorField = ({ label, value, onChange }) => {
+  const [txt, setTxt] = useState(value);
+  useEffect(() => { setTxt(value); }, [value]);
+  const tryCommit = (raw) => {
+    let v = raw.trim();
+    if (/^[0-9a-fA-F]{6}$/.test(v) || /^[0-9a-fA-F]{3}$/.test(v)) v = "#" + v;
+    if (/^#[0-9a-fA-F]{6}$/.test(v) || /^#[0-9a-fA-F]{3}$/.test(v)) onChange(expandHex(v).toUpperCase());
+  };
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-2 py-1.5">
+      <input type="color" value={expandHex(value)} onChange={(e) => onChange(e.target.value.toUpperCase())}
+        className="h-8 w-9 rounded cursor-pointer border-0 bg-transparent p-0" style={{ minWidth: 36 }} aria-label={label + " colour picker"} />
+      <div className="flex-1 min-w-0">
+        <span className="block text-[11px] font-semibold text-slate-600 leading-tight">{label}</span>
+        <input value={txt} onChange={(e) => { setTxt(e.target.value); tryCommit(e.target.value); }} onBlur={() => setTxt(value)}
+          placeholder="#RRGGBB" spellCheck={false} className="w-full text-[12px] text-slate-500 font-mono leading-tight bg-transparent focus:outline-none focus:text-slate-800" />
+      </div>
+    </div>
+  );
+};
+const Section = ({ n, title, sub, children }) => (
+  <section className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
+    <div className="mb-3">
+      <h3 className="text-[15px] font-bold text-slate-800"><span className="text-teal-700 mr-1.5">{n}.</span>{title}</h3>
+      {sub && <p className="text-[13px] text-slate-500 mt-0.5 leading-snug">{sub}</p>}
+    </div>
+    {children}
+  </section>
+);
+const Toggle = ({ checked, onChange, children }) => (
+  <label className="flex items-center gap-2 text-[13px] font-semibold text-slate-700">
+    <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="h-4 w-4 accent-teal-700" />
+    {children}
+  </label>
+);
+
+/* ---------------- Settings modal ---------------- */
+const SettingsModal = ({ gh, onSave, onClose }) => {
+  const [repo, setRepo] = useState(gh.repo || "");
+  const [branch, setBranch] = useState(gh.branch || "main");
+  const [token, setToken] = useState(gh.token || "");
+  const [showToken, setShowToken] = useState(false);
+  const rawUrl = repo ? "https://raw.githubusercontent.com/" + repo + "/" + (branch || "main") + "/timers.json" : "";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-[17px] font-bold text-slate-800">GitHub publish settings</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl font-bold leading-none">✕</button>
+        </div>
+
+        <div className="space-y-4">
+          <div className="rounded-xl bg-sky-50 border border-sky-200 p-3 text-[13px] text-sky-800 leading-relaxed">
+            <b>One-time setup:</b> Create a free GitHub repo, then generate a Personal Access Token with <b>Contents: read &amp; write</b> permission on that repo only. Paste both below.
+            {" "}<a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener" className="underline font-semibold">Create token ↗</a>
+          </div>
+
+          <Field label="GitHub repo" hint='e.g. yourname/bc-timers — create a free repo at github.com first'>
+            <input className={inputCls} placeholder="yourname/bc-timers" value={repo} onChange={(e) => setRepo(e.target.value.trim())} spellCheck={false} />
+          </Field>
+          <Field label="Branch" hint="Usually main">
+            <input className={inputCls} placeholder="main" value={branch} onChange={(e) => setBranch(e.target.value.trim())} spellCheck={false} />
+          </Field>
+          <Field label="Personal Access Token" hint="Stored only in your browser (localStorage). Never sent anywhere except GitHub.">
+            <div className="relative">
+              <input className={inputCls + " pr-16 font-mono text-[13px]"} type={showToken ? "text" : "password"}
+                placeholder="github_pat_…" value={token} onChange={(e) => setToken(e.target.value.trim())} spellCheck={false} />
+              <button onClick={() => setShowToken(!showToken)} className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-semibold text-slate-500 hover:text-slate-700 px-1">
+                {showToken ? "Hide" : "Show"}
+              </button>
+            </div>
+          </Field>
+
+          {rawUrl && (
+            <div className="rounded-lg bg-slate-50 border border-slate-200 p-3">
+              <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 mb-1">Your timers.json will be live at:</p>
+              <p className="font-mono text-[11px] text-teal-700 break-all">{rawUrl}</p>
+              <p className="text-[11px] text-slate-500 mt-1">This URL goes into your engine script. Changes are live instantly — no CDN cache.</p>
+            </div>
+          )}
+        </div>
+
+        <div className="flex gap-2 mt-5">
+          <button onClick={onClose} className="flex-1 rounded-lg border border-slate-300 px-4 py-2 text-[14px] font-semibold text-slate-600 hover:bg-slate-50">Cancel</button>
+          <button onClick={() => onSave({ repo, branch: branch || "main", token })}
+            className="flex-1 rounded-lg bg-teal-700 text-white px-4 py-2 text-[14px] font-bold hover:bg-teal-800">Save settings</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ---------------- Phase timeline ---------------- */
+const PhaseTimeline = ({ t }) => {
+  const C = buildCfg(t);
+  if (!C.end || C.ph.length === 0) return null;
+  const starts = C.ph.map((p) => p.at).filter(Boolean);
+  const start = C.show || (starts.length ? Math.min(...starts) - 3 * 864e5 : C.end - 14 * 864e5);
+  const span = Math.max(C.end - start, 1);
+  const pct = (ms) => Math.min(98, Math.max(0, ((ms - start) / span) * 100));
+  const nowP = pct(Date.now());
+  const fmt = (ms) => new Date(ms).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  return (
+    <div className="mt-1 mb-3">
+      <div className="relative h-3 rounded-full overflow-hidden bg-slate-200">
+        {C.ph.map((p, i) => {
+          const from = i === 0 ? 0 : pct(p.at);
+          const to = i === C.ph.length - 1 ? 100 : pct(C.ph[i + 1].at);
+          return <div key={i} className="absolute top-0 bottom-0" style={{ left: from + "%", width: Math.max(to - from, 0) + "%", background: p.bg || t.style.bg, opacity: 0.55 + i * (0.45 / Math.max(C.ph.length - 1, 1)) }} />;
+        })}
+        {Date.now() >= start && Date.now() <= C.end && (
+          <div className="absolute top-0 bottom-0 w-0.5 bg-amber-500" style={{ left: nowP + "%" }} title="now" />
+        )}
+      </div>
+      <div className="relative h-9 mt-1 text-[10px] text-slate-500">
+        {C.ph.map((p, i) => (
+          <div key={i} className="absolute -translate-x-1/2 text-center whitespace-nowrap" style={{ left: Math.max(4, i === 0 ? 4 : pct(p.at)) + "%" }}>
+            <div className="font-semibold text-slate-600">P{i + 1}</div>
+            <div>{i === 0 ? "start" : fmt(p.at)}</div>
+          </div>
+        ))}
+        <div className="absolute right-0 text-right">
+          <div className="font-semibold text-slate-600">End</div>
+          <div>{fmt(C.end)}</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ================================================================
+   MAIN APP
+================================================================ */
+function CountdownManager() {
+  const [timers, setTimers] = useState([]);
+  const [selId, setSelId] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [loadMsg, setLoadMsg] = useState("Loading…");
+  const [dirty, setDirty] = useState(false);
+  const [flash, setFlash] = useState("");
+  const [now, setNow] = useState(Date.now());
+  const [sim, setSim] = useState("live");
+
+  // GitHub settings
+  const [gh, setGh] = useState({ repo: "", branch: "main", token: "" });
+  const [showSettings, setShowSettings] = useState(false);
+  const [publishState, setPublishState] = useState("idle"); // idle | publishing | done | error
+  const [publishMsg, setPublishMsg] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Copy buttons
+  const [copiedEngine, setCopiedEngine] = useState(false);
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
+  const engineRef = useRef(null);
+  const snippetRef = useRef(null);
+
+  useEffect(() => {
+    const iv = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, []);
+
+  // Load GitHub settings + timers on startup
+  useEffect(() => {
+    (async () => {
+      // Always load GitHub settings from localStorage first
+      let ghSettings = { repo: "", branch: "main", token: "" };
+      try { const g = await AppStorage.get("wcdt:gh"); if (g && g.value) ghSettings = JSON.parse(g.value); } catch (e) {}
+      setGh(ghSettings);
+
+      let list = null;
+
+      // If GitHub is configured, try to load timers-lib.json from GitHub
+      if (ghSettings.repo) {
+        try {
+          setLoadMsg("Loading your timers from GitHub…");
+          list = await githubLoadLib(ghSettings);
+          if (list && list.length) list = list.map(migrate);
+          else list = null;
+        } catch (e) { list = null; }
+      }
+
+      // Fallback to localStorage
+      if (!list) {
+        try { const r = await AppStorage.get("wcdt:timers"); if (r && r.value) list = JSON.parse(r.value).map(migrate); } catch (e) {}
+      }
+
+      // Seed example timer if nothing found
+      let seeded = false;
+      try { const f = await AppStorage.get("wcdt:seedv2"); if (f && f.value) seeded = true; } catch (e) {}
+      if (!list || !list.length) list = [seedTimer()];
+      else if (!seeded) list = [...list, seedTimer()];
+      if (!seeded) { try { await AppStorage.set("wcdt:seedv2", "1"); } catch (e) {} }
+
+      setTimers(list);
+      setSelId(list[0].id);
+      setLoadMsg("");
+      setLoading(false);
+    })();
+  }, []);
+
+  const sel = timers.find((t) => t.id === selId) || null;
+
+  // Google Fonts preview
+  useEffect(() => {
+    if (!sel) return;
+    const name = googleFontName(sel.style);
+    if (!name) return;
+    const gid = "wcdt-gf-" + name.replace(/\s+/g, "-");
+    if (!document.getElementById(gid)) {
+      const l = document.createElement("link"); l.id = gid; l.rel = "stylesheet";
+      l.href = "https://fonts.googleapis.com/css2?family=" + encodeURIComponent(name).replace(/%20/g, "+") + ":wght@400;700;900&display=swap";
+      document.head.appendChild(l);
+    }
+  }, [sel && sel.style.font, sel && sel.style.customFont, sel && sel.style.customGoogle]);
+
+  const persist = async (list) => {
+    try {
+      if (gh.repo && gh.token) {
+        // GitHub configured — save to GitHub as timers-lib.json
+        await githubSaveLib(gh, list);
+      } else {
+        // Fallback — save to localStorage
+        await AppStorage.set("wcdt:timers", JSON.stringify(list));
+      }
+      setDirty(false);
+      setFlash("Saved");
+      setTimeout(() => setFlash(""), 1800);
+    } catch (e) {
+      setFlash("Save failed: " + e.message);
+      setTimeout(() => setFlash(""), 4000);
+    }
+  };
+
+  const saveGh = async (settings) => {
+    setGh(settings);
+    await AppStorage.set("wcdt:gh", JSON.stringify(settings));
+    setShowSettings(false);
+    // If GitHub is now configured, reload timers from GitHub
+    if (settings.repo && settings.token) {
+      try {
+        const list = await githubLoadLib(settings);
+        if (list && list.length) {
+          setTimers(list.map(migrate));
+          setSelId(list[0].id);
+          setDirty(false);
+        }
+      } catch (e) {}
+    }
+  };
+
+  const refreshFromGitHub = async () => {
+    if (!gh.repo) { alert("Set up GitHub first."); return; }
+    if (dirty && !confirm("You have unsaved changes. Reload from GitHub and lose them?")) return;
+    setRefreshing(true);
+    try {
+      const list = await githubLoadLib(gh);
+      if (list && list.length) {
+        setTimers(list.map(migrate));
+        setSelId(list[0].id);
+        setDirty(false);
+        setFlash("Reloaded from GitHub");
+        setTimeout(() => setFlash(""), 2000);
+      } else {
+        alert("No timers found in GitHub library.");
+      }
+    } catch (e) {
+      alert("Could not load from GitHub: " + e.message);
+    }
+    setRefreshing(false);
+  };
+
+  const update = (patch) => { setTimers((ts) => ts.map((t) => (t.id === selId ? { ...t, ...patch } : t))); setDirty(true); };
+  const updateStyle = (patch) => sel && update({ style: { ...sel.style, ...patch } });
+  const updatePhase = (pid, patch) => sel && update({ phases: sel.phases.map((p) => (p.id === pid ? { ...p, ...patch } : p)) });
+
+  const addTimer = () => {
+    const t = blankTimer(sel ? sel.tz : "+10:00");
+    setTimers((ts) => [...ts, t]); setSelId(t.id); setSim("live"); setDirty(true);
+  };
+  const duplicate = () => {
+    if (!sel) return;
+    const c = JSON.parse(JSON.stringify(sel)); c.id = uid(); c.name = sel.name + " (copy)";
+    c.phases = c.phases.map((p) => ({ ...p, id: uid() }));
+    setTimers((ts) => [...ts, c]); setSelId(c.id); setDirty(true);
+  };
+  const remove = () => {
+    if (!sel) return;
+    if (!confirm('Delete "' + sel.name + '"?')) return;
+    const rest = timers.filter((t) => t.id !== selId);
+    setTimers(rest); setSelId(rest[0] ? rest[0].id : null); setDirty(true);
+  };
+
+  const fileRef = useRef(null);
+  const exportLib = () => {
+    const blob = new Blob([JSON.stringify(timers, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = "countdown-timers-backup.json"; a.click(); URL.revokeObjectURL(a.href);
+  };
+  const importLib = (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const list = JSON.parse(r.result).map(migrate);
+        if (!list.length) throw new Error("empty");
+        setTimers(list); setSelId(list[0].id); persist(list);
+      } catch (err) { alert("That file doesn’t look like a timer backup."); }
+    };
+    r.readAsText(f); e.target.value = "";
+  };
+
+  // Publish timers.json to GitHub
+  const publish = async () => {
+    if (!gh.repo || !gh.token) { setShowSettings(true); return; }
+    setPublishState("publishing"); setPublishMsg("");
+    try {
+      await githubPublish(gh, timers);
+      setPublishState("done");
+      setPublishMsg("Published! Live instantly on your BC pages.");
+      setTimeout(() => { setPublishState("idle"); setPublishMsg(""); }, 6000);
+    } catch (err) {
+      setPublishState("error");
+      setPublishMsg("Error: " + err.message);
+      setTimeout(() => { setPublishState("idle"); setPublishMsg(""); }, 8000);
+    }
+  };
+
+  const copyText = async (text, ref, setFlag) => {
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (e) {}
+    if (!ok && ref.current) { ref.current.select(); try { ok = document.execCommand("copy"); } catch (e) {} }
+    setFlag(ok); setTimeout(() => setFlag(false), 2000);
+  };
+
+  const rawUrl = gh.repo ? "https://raw.githubusercontent.com/" + gh.repo + "/" + (gh.branch || "main") + "/timers.json" : "";
+  const engineScript = useMemo(() => buildEngineScript(rawUrl), [rawUrl]);
+  const snippet = useMemo(() => (sel ? buildSnippet(sel) : ""), [sel]);
+
+  const simNow = useMemo(() => {
+    if (!sel) return now;
+    const C = buildCfg(sel);
+    if (sim === "ended") return C.end + 1000 + (now % 1000);
+    if (typeof sim === "number") { const base = Math.max(C.ph[sim] ? C.ph[sim].at : 0, C.show || 0) + 1000; return base + (now % 60000); }
+    return now;
+  }, [sel, sim, now]);
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center bg-slate-100 text-slate-500 text-sm">{loadMsg || "Loading…"}</div>;
+
+  const status = sel ? getStatus(sel, now) : null;
+  const preview = sel ? renderHTML(buildCfg(sel), simNow) : null;
+  const chip = (active) => "rounded-full px-2.5 py-1 text-[11px] font-bold border " + (active ? "bg-slate-800 text-white border-slate-800" : "bg-white border-slate-300 text-slate-600");
+  const ghReady = !!(gh.repo && gh.token);
+
+  return (
+    <div className="min-h-screen bg-[#EDF0F3] text-slate-800" style={{ fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif" }}>
+      {showSettings && <SettingsModal gh={gh} onSave={saveGh} onClose={() => setShowSettings(false)} />}
+
+      <header className="bg-[#16243A] text-white">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
+          <div className="h-8 w-8 rounded-lg bg-amber-400 text-[#16243A] grid place-items-center font-black text-sm" style={{ fontFamily: "Consolas, Menlo, monospace" }}>:59</div>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-[16px] font-bold leading-tight">Countdown Manager</h1>
+            <p className="text-[11px] text-slate-300 leading-tight">Campaign timers for web pages · saved to your library</p>
+          </div>
+          <button onClick={() => setShowSettings(true)} title="GitHub publish settings"
+            className={"shrink-0 rounded-lg border text-[12px] font-semibold px-2.5 py-2 " + (ghReady ? "border-emerald-400 text-emerald-300 hover:bg-slate-700" : "border-amber-400 text-amber-300 hover:bg-slate-700")}>
+            ⚙ {ghReady ? "GitHub ✓" : "Setup GitHub"}
+          </button>
+          {ghReady && (
+            <button onClick={refreshFromGitHub} disabled={refreshing} title="Reload all timers from GitHub"
+              className="shrink-0 rounded-lg border border-slate-500 text-slate-200 text-[12px] font-semibold px-2.5 py-2 hover:bg-slate-700 disabled:opacity-50">
+              {refreshing ? "↺ Loading…" : "↺ Reload"}
+            </button>
+          )}
+          <button onClick={exportLib} title="Download a backup of all timers" className="shrink-0 rounded-lg border border-slate-500 text-slate-200 text-[12px] font-semibold px-2.5 py-2 hover:bg-slate-700">Export</button>
+          <button onClick={() => fileRef.current && fileRef.current.click()} className="shrink-0 rounded-lg border border-slate-500 text-slate-200 text-[12px] font-semibold px-2.5 py-2 hover:bg-slate-700">Import</button>
+          <input ref={fileRef} type="file" accept=".json,application/json" onChange={importLib} className="hidden" />
+          <button onClick={addTimer} className="shrink-0 rounded-lg bg-amber-400 text-[#16243A] font-bold text-[13px] px-3 py-2 hover:bg-amber-300">+ New timer</button>
+        </div>
+      </header>
+
+      <div className="max-w-6xl mx-auto px-3 sm:px-4 py-4 grid gap-4 lg:grid-cols-[270px_1fr] items-start">
+        {/* Sidebar */}
+        <aside className="hidden lg:block sticky top-4 space-y-2">
+          <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500 px-1">Your timers ({timers.length})</p>
+          {timers.map((t) => {
+            const st = getStatus(t, now);
+            return (
+              <button key={t.id} onClick={() => { setSelId(t.id); setSim("live"); }}
+                className={"w-full text-left rounded-xl border p-3 transition " + (t.id === selId ? "border-teal-600 bg-white shadow-sm ring-1 ring-teal-600/30" : "border-slate-200 bg-white/70 hover:bg-white")}>
+                <div className="text-[14px] font-semibold truncate">{t.name}</div>
+                <div className="text-[11px] text-slate-400 font-mono mt-0.5">id: {toSlug(t.name)}</div>
+                <div className="text-[11px] text-slate-500 mt-0.5">Ends {fmtNice(t.endAt)}</div>
+                <span className={"inline-block mt-1.5 rounded-full px-2 py-0.5 text-[10px] font-bold " + toneCls[st.tone]}>{st.label}</span>
+              </button>
+            );
+          })}
+        </aside>
+
+        {/* Mobile chips */}
+        <div className="lg:hidden -mx-3 px-3 flex gap-2 overflow-x-auto pb-1">
+          {timers.map((t) => {
+            const st = getStatus(t, now);
+            return (
+              <button key={t.id} onClick={() => { setSelId(t.id); setSim("live"); }}
+                className={"shrink-0 rounded-full border px-3 py-1.5 text-[12px] font-semibold " + (t.id === selId ? "border-teal-600 bg-teal-700 text-white" : "border-slate-300 bg-white text-slate-700")}>
+                {t.name} <span className="opacity-70 font-normal">· {st.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {!sel ? (
+          <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-slate-500">
+            No timers yet. Tap <b>+ New timer</b> to create your first one.
+          </div>
+        ) : (
+          <main className="space-y-4 min-w-0">
+            {/* Name / actions */}
+            <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5">
+              <div className="flex flex-wrap items-center gap-2">
+                <input value={sel.name} onChange={(e) => update({ name: e.target.value })}
+                  className="flex-1 min-w-[160px] text-[17px] font-bold bg-transparent border-b border-transparent focus:border-slate-300 focus:outline-none py-0.5" />
+                <button onClick={duplicate} className="rounded-lg px-3 py-1.5 text-[13px] font-semibold border border-slate-300 bg-white hover:bg-slate-50">Duplicate</button>
+                <button onClick={remove} className="rounded-lg px-3 py-1.5 text-[13px] font-semibold border border-red-200 text-red-600 bg-white hover:bg-red-50">Delete</button>
+              </div>
+              <p className="text-[12px] text-slate-400 mt-1.5 font-mono">snippet id: <b className="text-slate-600">{toSlug(sel.name)}</b> — changes with the name</p>
+            </div>
+
+            {/* Preview */}
+            <div className="sticky top-0 z-30 -mx-3 px-3 sm:mx-0 sm:px-0 pt-2 pb-1" style={{ background: "linear-gradient(#EDF0F3 85%, rgba(237,240,243,0))" }}>
+              <div className="bg-white rounded-xl border border-slate-200 shadow-md p-3 sm:p-4">
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <h3 className="text-[14px] font-bold text-slate-800">Live preview</h3>
+                  <span className={"rounded-full px-2 py-0.5 text-[10px] font-bold " + toneCls[status.tone]}>{status.label}</span>
+                  <div className="flex-1" />
+                  <div className="flex flex-wrap gap-1.5">
+                    <button onClick={() => setSim("live")} className={chip(sim === "live")}>Right now</button>
+                    {sel.phases.map((p, i) => <button key={p.id} onClick={() => setSim(i)} className={chip(sim === i)}>Phase {i + 1}</button>)}
+                    <button onClick={() => setSim("ended")} className={chip(sim === "ended")}>After end</button>
+                  </div>
+                </div>
+                <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-2.5 sm:p-3 max-h-[38vh] overflow-y-auto">
+                  {preview.hidden
+                    ? <p className="text-center text-[13px] text-slate-400 py-5">Nothing shows at this moment — the timer is {sim === "ended" ? "set to disappear after the end time" : "outside its visible window"}.</p>
+                    : <div dangerouslySetInnerHTML={{ __html: preview.html }} />}
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <p className="text-[11px] text-slate-400 flex-1">Exactly what shows on the live page.</p>
+                  <button onClick={() => persist(timers)} className={"rounded-lg px-4 py-1.5 text-[13px] font-bold " + (dirty ? "bg-teal-700 text-white hover:bg-teal-800" : "bg-slate-200 text-slate-500")}>
+                    {flash || (dirty ? "Save changes" : "Saved ✓")}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* 1. Style */}
+            <Section n="1" title="Base style" sub="The default look. Phases and the ended message can override colours later.">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <ColorField label="Background" value={sel.style.bg} onChange={(v) => updateStyle({ bg: v })} />
+                <ColorField label="Text" value={sel.style.fg} onChange={(v) => updateStyle({ fg: v })} />
+                <ColorField label="Digit boxes" value={sel.style.digitBg} onChange={(v) => updateStyle({ digitBg: v })} />
+                <ColorField label="Digits" value={sel.style.digitFg} onChange={(v) => updateStyle({ digitFg: v })} />
+                <ColorField label="Button" value={sel.style.btnBg} onChange={(v) => updateStyle({ btnBg: v })} />
+                <ColorField label="Button text" value={sel.style.btnFg} onChange={(v) => updateStyle({ btnFg: v })} />
+              </div>
+              <div className="grid sm:grid-cols-2 gap-3 mt-4">
+                <Field label="Font" hint="Web-safe fonts work everywhere. Lato is fetched from Google Fonts. 'Custom' uses a font already loaded on the page.">
+                  <select className={inputCls} value={sel.style.font} onChange={(e) => updateStyle({ font: e.target.value })}>
+                    {FONTS.map((f) => <option key={f.v} value={f.v}>{f.label}</option>)}
+                  </select>
+                </Field>
+                <Field label="Digit style">
+                  <select className={inputCls} value={sel.style.digitFont} onChange={(e) => updateStyle({ digitFont: e.target.value })}>
+                    <option value="mono">Monospace (classic timer look)</option>
+                    <option value="match">Match the font above</option>
+                  </select>
+                </Field>
+              </div>
+              {sel.style.font === "custom" && (
+                <div className="grid sm:grid-cols-2 gap-3 mt-3 items-end">
+                  <Field label="Custom font name" hint="Exactly as declared, e.g. Barlow or Proxima Nova.">
+                    <input className={inputCls} placeholder="e.g. Barlow" value={sel.style.customFont} onChange={(e) => updateStyle({ customFont: e.target.value })} />
+                  </Field>
+                  <div className="pb-2">
+                    <Toggle checked={sel.style.customGoogle} onChange={(v) => updateStyle({ customGoogle: v })}>Load it from Google Fonts</Toggle>
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
+                <Field label="Size">
+                  <select className={inputCls} value={sel.style.size} onChange={(e) => updateStyle({ size: e.target.value })}>
+                    <option value="small">Small</option><option value="regular">Regular</option><option value="large">Large</option>
+                  </select>
+                </Field>
+                <Field label="Max width (px)" hint="Blank = full width.">
+                  <input type="number" min="0" className={inputCls} placeholder="Full" value={sel.style.maxWidth} onChange={(e) => updateStyle({ maxWidth: e.target.value })} />
+                </Field>
+                <Field label="Min height (px)" hint="Blank = automatic.">
+                  <input type="number" min="0" className={inputCls} placeholder="Auto" value={sel.style.minHeight} onChange={(e) => updateStyle({ minHeight: e.target.value })} />
+                </Field>
+                <Field label="Alignment" hint="Applies when max width is set.">
+                  <select className={inputCls} value={sel.style.align} onChange={(e) => updateStyle({ align: e.target.value })}>
+                    <option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option>
+                  </select>
+                </Field>
+              </div>
+              <div className="grid sm:grid-cols-3 gap-3 mt-4 items-end">
+                <Field label={"Vertical padding: " + sel.style.padV + "px"}>
+                  <input type="range" min="4" max="48" value={sel.style.padV} onChange={(e) => updateStyle({ padV: +e.target.value })} className="w-full accent-teal-700" />
+                </Field>
+                <Field label={"Horizontal padding: " + sel.style.padH + "px"}>
+                  <input type="range" min="4" max="64" value={sel.style.padH} onChange={(e) => updateStyle({ padH: +e.target.value })} className="w-full accent-teal-700" />
+                </Field>
+                <Field label={"Corner roundness: " + sel.style.radius + "px"}>
+                  <input type="range" min="0" max="24" value={sel.style.radius} onChange={(e) => updateStyle({ radius: +e.target.value })} className="w-full accent-teal-700" />
+                </Field>
+              </div>
+              <div className="mt-4 rounded-xl bg-slate-50 border border-slate-200 p-3">
+                <p className="text-[12px] font-bold uppercase tracking-wide text-slate-500 mb-2">Optional effects</p>
+                <div className="grid sm:grid-cols-2 gap-x-6 gap-y-2.5">
+                  <Toggle checked={sel.style.labels} onChange={(v) => updateStyle({ labels: v })}>Days / hrs / min / sec labels</Toggle>
+                  <Toggle checked={sel.style.fxColons} onChange={(v) => updateStyle({ fxColons: v })}>Colons between the numbers</Toggle>
+                  <Toggle checked={sel.style.fxShadow} onChange={(v) => updateStyle({ fxShadow: v })}>Drop shadow</Toggle>
+                  <Toggle checked={sel.style.fxPulse} onChange={(v) => updateStyle({ fxPulse: v })}>Pulse the seconds</Toggle>
+                  <Toggle checked={sel.style.fxGlow} onChange={(v) => updateStyle({ fxGlow: v })}>Soft glow (uses the button colour)</Toggle>
+                  <Toggle checked={sel.style.fxGradient} onChange={(v) => updateStyle({ fxGradient: v })}>Gradient background</Toggle>
+                  {sel.style.fxGradient && <div className="w-48"><ColorField label="Gradient second colour" value={sel.style.fxGradient2} onChange={(v) => updateStyle({ fxGradient2: v })} /></div>}
+                  <Toggle checked={sel.style.fxBorder} onChange={(v) => updateStyle({ fxBorder: v })}>Border</Toggle>
+                  {sel.style.fxBorder && <div className="w-48"><ColorField label="Border colour" value={sel.style.fxBorderColor} onChange={(v) => updateStyle({ fxBorderColor: v })} /></div>}
+                </div>
+              </div>
+            </Section>
+
+            {/* 2. Deadline */}
+            <Section n="2" title="Countdown deadline" sub="The moment the countdown reaches zero.">
+              <div className="grid sm:grid-cols-2 gap-3">
+                <Field label="Ends at">
+                  <input type="datetime-local" className={inputCls} value={sel.endAt} onChange={(e) => update({ endAt: e.target.value })} />
+                </Field>
+                <Field label="Timezone" hint="The deadline is this exact moment worldwide — visitors everywhere see the same remaining time.">
+                  <select className={inputCls} value={sel.tz} onChange={(e) => update({ tz: e.target.value })}>
+                    {TIMEZONES.map((z) => <option key={z.v} value={z.v}>{z.label}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <div className="mt-3">
+                <span className="block text-[13px] font-semibold text-slate-700 mb-1">When the countdown hits zero…</span>
+                <div className="flex flex-wrap gap-2">
+                  <button onClick={() => update({ endMode: "hide" })} className={"rounded-lg px-3 py-1.5 text-[13px] font-semibold border " + (sel.endMode === "hide" ? "bg-slate-800 text-white border-slate-800" : "bg-white border-slate-300 text-slate-600")}>Disappear</button>
+                  <button onClick={() => { update({ endMode: "message" }); setSim("ended"); }} className={"rounded-lg px-3 py-1.5 text-[13px] font-semibold border " + (sel.endMode === "message" ? "bg-slate-800 text-white border-slate-800" : "bg-white border-slate-300 text-slate-600")}>Show a message</button>
+                </div>
+                {sel.endMode === "message" && (
+                  <div className="mt-3 rounded-xl bg-slate-50 border border-slate-200 p-3 space-y-3">
+                    <Field label="Message" hint="HTML allowed. Tap 'After end' above to preview.">
+                      <textarea rows={2} className={inputCls} placeholder="e.g. Offer ended — join the waitlist" value={sel.endMsg} onChange={(e) => update({ endMsg: e.target.value })} />
+                    </Field>
+                    <div className="grid grid-cols-2 gap-2">
+                      <ColorField label="Background" value={sel.endBg} onChange={(v) => update({ endBg: v })} />
+                      <ColorField label="Text" value={sel.endFg} onChange={(v) => update({ endFg: v })} />
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      <Field label="Button text (optional)"><input className={inputCls} placeholder="e.g. Join the waitlist" value={sel.endBtnText} onChange={(e) => update({ endBtnText: e.target.value })} /></Field>
+                      <Field label="Button link"><input className={inputCls} placeholder="https://…" value={sel.endBtnUrl} onChange={(e) => update({ endBtnUrl: e.target.value })} /></Field>
+                    </div>
+                    {sel.endBtnText && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <ColorField label="Button" value={sel.endBtnBg} onChange={(v) => update({ endBtnBg: v })} />
+                        <ColorField label="Button text" value={sel.endBtnFg} onChange={(v) => update({ endBtnFg: v })} />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </Section>
+
+            {/* 3. Auto show/hide */}
+            <Section n="3" title="Auto show / hide" sub="Optional. The timer stays invisible until the show date, and removes itself after the hide date.">
+              <div className="grid sm:grid-cols-2 gap-3">
+                <Field label="Auto-show from (optional)" hint="Leave blank to show immediately.">
+                  <input type="datetime-local" className={inputCls} value={sel.showAt} onChange={(e) => update({ showAt: e.target.value })} />
+                </Field>
+                <Field label="Auto-hide after (optional)" hint="Leave blank to follow the 'hits zero' setting above.">
+                  <input type="datetime-local" className={inputCls} value={sel.hideAt} onChange={(e) => update({ hideAt: e.target.value })} />
+                </Field>
+              </div>
+            </Section>
+
+            {/* 4. Phases */}
+            <Section n="4" title="Message phases" sub="Change the wording (and optionally colours) automatically on set dates as the deadline approaches.">
+              <PhaseTimeline t={sel} />
+              <div className="space-y-3">
+                {sel.phases.map((p, i) => {
+                  const warn = phaseOutOfRange(sel, p, i);
+                  return (
+                    <div key={p.id} className="rounded-xl border border-slate-200 p-3 sm:p-4" style={{ background: warn ? "rgb(247,192,192)" : "#F8FAFC" }}>
+                      <div className="flex items-center gap-2 mb-2">
+                        <button onClick={() => setSim(i)} className={"rounded-md text-[11px] font-bold px-2 py-0.5 " + (sim === i ? "bg-amber-400 text-slate-900" : "bg-slate-800 text-white hover:bg-slate-700")}>Phase {i + 1}</button>
+                        <span className="text-[12px] text-slate-600 flex-1">{i === 0 ? "From the start" : "Starts on its date below"}</span>
+                        {sel.phases.length > 1 && <button onClick={() => { update({ phases: sel.phases.filter((x) => x.id !== p.id) }); setSim("live"); }} className="text-[12px] font-semibold text-red-600 hover:underline">Remove</button>}
+                      </div>
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        {i > 0 && (
+                          <Field label={<span>Switches on {warn && <span title="Outside the visible window" className="ml-1">⚠️</span>}</span>}>
+                            <input type="datetime-local" className={inputCls} value={p.startAt} onChange={(e) => updatePhase(p.id, { startAt: e.target.value })} />
+                            {warn && <span className="block text-[12px] font-semibold text-red-800 mt-1">This date falls outside the visible window — this phase will never be seen.</span>}
+                          </Field>
+                        )}
+                        <Field label="Message" hint="HTML allowed, e.g. <b>bold</b>">
+                          <textarea rows={2} className={inputCls} placeholder="e.g. Save US$300 today" value={p.message} onChange={(e) => updatePhase(p.id, { message: e.target.value })} />
+                        </Field>
+                        <Field label="Button text (optional)"><input className={inputCls} placeholder="e.g. Shop now" value={p.ctaText} onChange={(e) => updatePhase(p.id, { ctaText: e.target.value })} /></Field>
+                        <Field label="Button link"><input className={inputCls} placeholder="https://…" value={p.ctaUrl} onChange={(e) => updatePhase(p.id, { ctaUrl: e.target.value })} /></Field>
+                      </div>
+                      <div className="mt-3">
+                        <Toggle checked={p.overrideColors} onChange={(v) => updatePhase(p.id, { overrideColors: v })}>Use different colours for this phase</Toggle>
+                      </div>
+                      {p.overrideColors && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2">
+                          <ColorField label="Background" value={p.bg} onChange={(v) => updatePhase(p.id, { bg: v })} />
+                          <ColorField label="Text" value={p.fg} onChange={(v) => updatePhase(p.id, { fg: v })} />
+                          <ColorField label="Digit boxes" value={p.db} onChange={(v) => updatePhase(p.id, { db: v })} />
+                          <ColorField label="Digits" value={p.df} onChange={(v) => updatePhase(p.id, { df: v })} />
+                          <ColorField label="Button" value={p.bb} onChange={(v) => updatePhase(p.id, { bb: v })} />
+                          <ColorField label="Button text" value={p.bf} onChange={(v) => updatePhase(p.id, { bf: v })} />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <button onClick={() => update({ phases: [...sel.phases, newPhase(sel.style, sel.endAt ? toLocalStr(epoch(sel.endAt, sel.tz) - 2 * 864e5, sel.tz) : "")] })}
+                className="mt-3 rounded-lg border border-dashed border-slate-400 px-3 py-2 text-[13px] font-semibold text-slate-600 hover:bg-slate-50 w-full">+ Add a phase</button>
+            </Section>
+
+            {/* 5. Get the code */}
+            <Section n="5" title="Get the code" sub="Three steps — engine once, publish when timers change, snippet on each page.">
+
+              {/* Step A — Engine script */}
+              <div className="rounded-xl border-2 border-teal-600 bg-teal-50 p-4 mb-3">
+                <div className="flex flex-wrap items-start gap-3 mb-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[14px] font-bold text-teal-800">① Engine script — paste once into BigCommerce Script Manager</p>
+                    <p className="text-[12px] text-teal-700 mt-0.5 leading-snug">
+                      Add to all pages (footer). <b>Never touch again.</b>
+                      {!ghReady && <span className="ml-1 text-amber-700 font-semibold">⚠ Set up GitHub first so the URL is baked in correctly.</span>}
+                      {ghReady && <span className="ml-1">The jsDelivr URL is already set to your repo.</span>}
+                    </p>
+                  </div>
+                  <button onClick={() => copyText(engineScript, engineRef, setCopiedEngine)}
+                    className="shrink-0 rounded-lg bg-teal-700 text-white font-bold text-[13px] px-4 py-2 hover:bg-teal-800 whitespace-nowrap">
+                    {copiedEngine ? "Copied ✓" : "Copy engine"}
+                  </button>
+                </div>
+                <textarea ref={engineRef} readOnly value={engineScript} rows={4} onFocus={(e) => e.target.select()}
+                  className="w-full rounded-lg border border-teal-300 bg-slate-900 text-slate-200 font-mono text-[11px] p-3 leading-relaxed" />
+              </div>
+
+              {/* Step B — Publish */}
+              <div className="rounded-xl border-2 border-violet-500 bg-violet-50 p-4 mb-3">
+                <div className="flex flex-wrap items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[14px] font-bold text-violet-800">② Publish timers.json — push all timers to GitHub in one click</p>
+                    <p className="text-[12px] text-violet-700 mt-0.5 leading-snug">
+                      Every timer in your library gets written to <b>timers.json</b> in your GitHub repo. The engine fetches it fresh on every page load.
+                      {!ghReady && <span className="ml-1 font-semibold">Click ⚙ Setup GitHub in the header first.</span>}
+                      {ghReady && <span className="ml-1 font-mono text-[11px] break-all">{rawUrl}</span>}
+                    </p>
+                    {publishMsg && (
+                      <p className={"mt-2 text-[12px] font-semibold rounded-lg px-3 py-1.5 inline-block " + (publishState === "error" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700")}>
+                        {publishMsg}
+                      </p>
+                    )}
+                  </div>
+                  <button onClick={publish} disabled={publishState === "publishing"}
+                    className={"shrink-0 rounded-lg font-bold text-[13px] px-5 py-2 whitespace-nowrap transition " +
+                      (publishState === "publishing" ? "bg-violet-300 text-white cursor-wait" :
+                       publishState === "done" ? "bg-emerald-600 text-white" :
+                       publishState === "error" ? "bg-red-600 text-white" :
+                       ghReady ? "bg-violet-600 text-white hover:bg-violet-700" : "bg-slate-300 text-slate-500 cursor-not-allowed")}>
+                    {publishState === "publishing" ? "Publishing…" : publishState === "done" ? "Published ✓" : publishState === "error" ? "Failed ✗" : "Publish"}
+                  </button>
+                </div>
+                {dirty && <p className="text-[12px] font-semibold text-amber-700 mt-2">⚠ You have unsaved changes — Save first, then Publish.</p>}
+              </div>
+
+              {/* Step C — Page snippet */}
+              <div className="rounded-xl border-2 border-amber-400 bg-amber-50 p-4">
+                <div className="flex flex-wrap items-start gap-3 mb-2">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[14px] font-bold text-amber-800">③ Page snippet — one line, never changes</p>
+                    <p className="text-[12px] text-amber-700 mt-0.5 leading-snug">Drop this into any BigCommerce HTML block, Shogun Custom HTML, or banner area. <b>You never need to update this snippet</b> — changing the timer in this tool and hitting Publish is all it takes.</p>
+                  </div>
+                  <button onClick={() => copyText(snippet, snippetRef, setCopiedSnippet)}
+                    className="shrink-0 rounded-lg bg-amber-500 text-white font-bold text-[13px] px-4 py-2 hover:bg-amber-600 whitespace-nowrap">
+                    {copiedSnippet ? "Copied ✓" : "Copy snippet"}
+                  </button>
+                </div>
+                <textarea ref={snippetRef} readOnly value={snippet} rows={2} onFocus={(e) => e.target.select()}
+                  className="w-full rounded-lg border border-amber-300 bg-slate-900 text-slate-200 font-mono text-[11px] p-3 leading-relaxed" />
+              </div>
+
+              <div className="mt-4 space-y-1.5 text-[13px] text-slate-600 leading-relaxed">
+                <p><b className="text-slate-800">Your workflow:</b> Design timer → Save → Publish → done. The snippet on the page never needs to change.</p>
+                <p><b className="text-slate-800">Multiple timers on one page?</b> Paste multiple snippets. Each ID maps to its own timer in timers.json.</p>
+                <p><b className="text-slate-800">Rename a timer?</b> The snippet ID is auto-generated from the name. If you rename, copy and replace the snippet on the page too.</p>
+                <p><b className="text-slate-800">For dotdigital emails:</b> Email clients block scripts. Use dotdigital's built-in countdown block instead.</p>
+              </div>
+            </Section>
+          </main>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<CountdownManager />);
+</script>
+</body>
+</html>
