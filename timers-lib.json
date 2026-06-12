@@ -3,7 +3,7 @@
     "id": "tuv55rr",
     "name": "Example: Hatch sale",
     "tz": "+10:00",
-    "endAt": "2026-06-16T17:00",
+    "endAt": "2026-07-18T17:00",
     "showAt": "2026-06-11T00:00",
     "hideAt": "2026-06-16T11:59",
     "endMode": "message",
